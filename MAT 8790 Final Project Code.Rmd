@@ -1,0 +1,324 @@
+---
+title: "What's on the Menu?"
+author: "Faith Platz"
+date: "22 December 2018"
+output:
+  html_document:
+    df_print: paged
+subtitle: MAT 8790 Final Project
+---
+
+```{r setup, message=FALSE}
+library(tidyverse)
+library(readr)
+library(lubridate)
+library(readxl)
+library(scales)
+library(wordcloud)
+library(jmuOutlier)
+```
+
+## Read in the data
+```{r data, message=FALSE, warning=FALSE}
+setwd("~/Documents/MAT 8790 - Data Science & Visualization/Projects/Final Project")
+
+dish <- read_csv("Dish.csv") %>%
+  rename("dish_id" = "id")
+
+menu <- read_csv("Menu.csv") %>%
+  rename("menu_id" = "id")
+
+menuItem <- read_csv("MenuItem.csv") %>%
+  rename("item_id" = "id")
+
+menuPage <- read_csv("MenuPage.csv") %>%
+  rename("menu_page_id" = "id")
+
+usd <- read_xlsx("cv2017.xlsx", sheet = "Sheet1")
+```
+
+
+## Merge datasets together
+```{r merge, warning=FALSE}
+# format date variable as a date
+menu <- menu %>%
+  mutate(date = as_date(date, format = "%y-%m-%d"))
+
+# merge menuPage with menu, delete unecessary variables
+m1 <- menu %>%
+  left_join(menuPage, by = "menu_id") %>%
+  select(-c(image_id:uuid))
+
+# merge menuItem with menu/menuPage
+m2 <- m1 %>%
+  left_join(menuItem, by = "menu_page_id")
+
+# try and fix the incorrect years
+m2 %>%
+  left_join(dish, by = "dish_id") %>%
+  select(call_number, date) %>%
+  unique() %>%
+  head(5)
+
+# we can see that the first four digits of call_number map to the menu's year.
+# (only showing five to save space)
+
+# merge dish with menu/menuPage/menuItem
+m3 <- m2 %>%
+  left_join(dish, by = "dish_id") %>%
+  # I used the call_number variable to tell me what these years were supposed to be mapped to
+  mutate(date = if_else(year(date) == 1, update(date, year = 1912), 
+                if_else(year(date) == 190, update(date, year = 1900),
+                if_else(year(date) == 1091, update(date, year = 1901),
+                if_else(year(date) == 2928, update(date, year = 1918), date))))) %>%
+  # change lower iterations of currencies to their equivalent value
+  mutate(price = if_else(currency == "Cents", price / 100, price)) %>%
+  mutate(price = if_else(currency == "Pence", price / 240, price)) %>%
+  mutate(price = if_else(currency == "Shillings", price / 20, price)) %>%
+  # re-assign the currency name for these modified currencies
+  mutate(currency = if_else(currency == "Cents", "Dollars", 
+                    if_else(currency == "Pence" | currency == "Shillings", "UK Pounds", currency))) %>%
+  mutate(Year = year(date))
+
+# merge in CPI conversion rate estimates from Oregon State University
+dollar0 <- m3 %>%
+  filter(currency == "Dollars") %>%
+  left_join(usd, by = "Year") %>%
+  mutate(price17 = price / CF)
+
+# graph distribution of currency used, ignoring missing values
+menu %>%
+  filter(!is.na(currency)) %>%
+  group_by(currency) %>%
+  summarize(menus = n()) %>%
+  ggplot(aes(reorder(currency, menus), menus)) +
+    geom_bar(stat = "identity", fill = "grey") +
+    coord_flip() +
+    labs(y = "Number of Menus", x = "Currency",
+         title = "Distribution of Currencies used in Observed Menus") +
+    geom_text(aes(label = menus), position = position_stack(vjust = 0.5),
+            size=2.5, color = "blue")
+```
+
+## Price Analysis - US Dollars only
+```{r prices over time USD}
+# categorize each menu its decade
+dollar <- dollar0 %>%
+  mutate(decade = ifelse(Year < 1860, "1850s",
+                  ifelse(Year < 1870, "1860s",
+                  ifelse(Year < 1880, "1870s",
+                  ifelse(Year < 1890, "1880s",
+                  ifelse(Year < 1900, "1890s",
+                  ifelse(Year < 1910, "1900s",
+                  ifelse(Year < 1920, "1910s",
+                  ifelse(Year < 1930, "1920s",
+                  ifelse(Year < 1940, "1930s",
+                  ifelse(Year < 1950, "1940s",
+                  ifelse(Year < 1960, "1950s",
+                  ifelse(Year < 1970, "1960s",
+                  ifelse(Year < 1980, "1970s",
+                  ifelse(Year < 1990, "1980s",
+                  ifelse(Year < 2000, "1990s",
+                  ifelse(Year < 2010, "2000s",
+                  ifelse(Year < 2020, "2010s", NA))))))))))))))))))
+  
+# look at the numeric summary of 2017 prices
+summary(dollar$price17)
+
+# graph 2017 price over time for all menus, looks pretty bad
+ggplot(dollar, aes(date, price17)) +
+  geom_point() +
+  labs(x = "Date", y = "Dish Price in 2017 Dollars",
+       title = "Restaurant Dish Prices Over Time", subtitle = "(In 2017 US Dollars)")
+
+# now graph 2017 prices over time using boxplots for each decade
+# only show up to the 99th percentile of 2017 prices and hide outliers
+dollar %>%
+  filter(price17 > 0 & price17 <= quantile(dollar$price17, .99, na.rm = T)) %>%
+  ggplot(aes(decade, price17)) +
+    geom_boxplot(outlier.shape = NA) +
+    labs(x = "Date Range", y = "Dish Price in 2017 Dollars",
+       title = "Restaurant Dish Prices Over Time", subtitle = "(In 2017 US Dollars)")
+
+# take a look at unadjusted prices over time using the same method
+dollar %>%
+  filter(price > 0 & price <= quantile(dollar$price, .99, na.rm = T) & 
+           !is.na(decade)) %>%
+  ggplot(aes(decade, price)) +
+    geom_boxplot(outlier.shape = NA) +
+    labs(x = "Date Range", y = "Dish Price",
+       title = "Restaurant Dish Prices Over Time", subtitle = "(Unadjusted)")
+
+# frequency distribution of priced menu items from each decade
+dollar %>%
+  filter(price17 > 0 & price17 <= quantile(dollar$price17, .99, na.rm = T)) %>%
+  group_by(decade) %>%
+  summarize(n())
+
+# show number of distinct menus in the 1870s decade category (only one)
+dollar %>%
+  filter(price17 > 0 & price17 <= quantile(dollar$price17, .99, na.rm = T) &
+           decade == "1870s") %>%
+  group_by(menu_id, Year) %>%
+  summarize(dishes = n())
+
+# show number of distinct menus in the 2010s decade category (only three)
+dollar %>%
+  filter(price17 > 0 & price17 <= quantile(dollar$price17, .99, na.rm = T) &
+           decade == "2010s") %>%
+  group_by(menu_id, Year) %>%
+  summarize(dishes = n())
+
+# Use Kruskal-Wallis test to see if there is a price difference among decades
+kruskal.test(price17 ~ factor(decade), data = dollar)
+  
+```
+
+### It appears that, from looking back at some of the menu scans from the NYPL, many (if not all) of the high price outliers we see here are likely incorrectly inputted data. For example, a dish may have been sold for 50 cents, but was inputted into the dataset as $50, still using currency = "Dollars." Due to the large volume of menus that would have to be examined to correct each and every one of these mistakes, I decided to simply focus on the values that did not appear to be massive outliers. However, trying to visualize a scatterplot with the presence of these values made it very difficult to see a clear relationship over time, and there was no clear cutoff for where the price values were starting to be incorrect or questionable.
+
+### So, I instead categorized each menu into its respective decade based on the recorded date of the menu. I was then able to create side-by-side boxplots for the 2017 adjusted price for menu items from each decade. In order to see the true distribution of these prices without being overwhelmed by the outlier values present in the data, I excluded the outliers from appearing on the plot, and focused only on the values at or below the 99th percentile of the 2017 price values, which is about \$111.
+
+### When speculating why we see the somewhat parabolic trend in menu prices since 1850, I gravitated toward where the menu prices were at its lowest, around the 1920s. This was the heart of the Prohibition Era in the United States. Consequently, restaurants really struggled to survive in the same way they used to, now that they could not make any money on alcohol sales. This led to many failed restaurants, and many restaurants shifting their focus to other markets, moving away from the formal dining room and looking toward the casual diner or soda fountain. This intuitively would lead to a drop in menu prices, as the products being served are not the same as they were before.
+
+### Also around this time, the Great Depression was on the horizon. By the end of the 1920s, many Americans simply could not afford to satisfy the high price points of more expensive restaurants. Restaurants owners still wanted to cater to their clientele, so a handful of them turned themselves into "penny restaurants," offering low-quality food for an even lower price point. 
+
+### After World War II, we begin to see menu prices increase more steadily. This is likely attributed to rising upper and middle classes, and the overall economic boom. Looking to the present day, our plot shows a fairly strong jump in menu prices from the 2000s to the 2010s. However, we must take this result with a grain of salt, as there were only three distinct menus included in this category, all from 2012. It is also important to note that the 1870s decade experience a similar issue, with only one unique menu representing it. These low menu counts may lead to increased variability and less accurate estimates. However, we do see a general upward trend for restaurant menu prices happening now.
+
+### I also administered the Kruskal-Wallis Test on these separate decade categories to see if the differences in menu prices were statistically significant. I chose this test because we cannot really assume normal data here due to the high amount of outliers here. Because the p-value was so low, we can conclude that at least one decade differs from the rest in terms of menu price in 2017 dollars.
+
+
+## Dish Popularity
+```{r}
+# initial look at the highest frequency menu items
+m3 %>%
+  group_by(name.y) %>%
+  summarize(n = n()) %>%
+  arrange(desc(n)) %>%
+  head(20)
+
+# remove capitalization and punctuation in all menu items
+dishname <- m3 %>%
+  mutate(dish = tolower(name.y)) %>%
+  mutate(dish = str_remove_all(dish, "[[:punct:]]")) %>%
+  filter(!is.na(dish))
+
+# data for first wordcloud
+wc1 <- dishname %>%
+  group_by(dish) %>%
+  summarize(appearances = n()) %>%
+  arrange(desc(appearances)) %>%
+  ungroup()
+
+# data for second wordcloud
+wc2 <- dishname %>%
+  filter(Year < 1900) %>%
+  group_by(dish) %>%
+  summarize(appearances = n()) %>%
+  arrange(desc(appearances)) %>%
+  ungroup()
+
+# data for third wordcloud
+wc3 <- dishname %>%
+  filter(Year > 1970) %>%
+  group_by(dish) %>%
+  summarize(appearances = n()) %>%
+  arrange(desc(appearances)) %>%
+  ungroup()
+
+# check for the total number of menus analyzed here (17,513)
+dishname %>%
+  group_by(menu_id) %>%
+  summarize(n()) %>%
+  nrow()
+
+# overall: most popular dishes
+wordcloud(words = wc1$dish, scale = c(2.25, 0.25), 
+          freq = wc1$appearances, 
+          colors = 1:5, max.words = 100)
+
+# pre-1900: most popular dishes
+wordcloud(words = wc2$dish, scale = c(2.25, 0.25), 
+          freq = wc2$appearances, 
+          colors = 1:5, max.words = 100)
+
+# post-1970: most popular dishes
+wordcloud(words = wc3$dish, scale = c(2.25, 0.25), 
+          freq = wc3$appearances, 
+          colors = 1:5, max.words = 100)
+```
+
+### From the overall wordcloud, we can see that the clear winner in terms of popularity on all menus in the dataset is coffee. Upon further investigation, it is evident that coffee appears on just over 50% of all menus analyzed. For these wordclouds, I decided to not combine common words into one category (e.g. categorize "early grey tea" as "tea"). My reasoning behind this is because common words do not necessarily mean that they are the same dish. For example, "coffee cake" is not the same as "coffee." If I created groupings like this, we could run into many issues that were not anticpated with incorrect categorizations. 
+
+### To try and visualize dish popularity over time, I looked as all menus before 1900 and all menus after 1970 separately. In both, we still see coffee as the highest frequency dish, suggesting that coffee has really lasted through the years as a dominating beverage in the restaurant industry. Before 1900 though, we see many more basic, raw dishes that we consider today to be mere ingredients. This could suggest that dishes have grown in sophistocation over the years. When looking at the most recent menus, more popular dishes didn't really seeem to be dishes at all. They were moreso beverages and desserts. This comparison is a testament to the nature of what things are considered "staples" of a restaurant menu over 100 years ago and today. Coffee, however, appears to be a lasting staple.
+
+
+## Deeper Dive: Coffee
+```{r}
+coffee <- dishname %>%
+  filter(str_detect(dish, "coffee"))
+
+coffee_wc <- coffee %>%
+  group_by(dish) %>%
+  summarize(appearances = n()) %>%
+  arrange(desc(appearances)) %>%
+  ungroup()
+
+wordcloud(words = coffee_wc$dish, scale = c(2, 0.5), 
+          freq = coffee_wc$appearances, 
+          colors = 1:4, max.words = 100)
+```
+
+### While there are many different iterations of "coffee" on the various restaurant menus, "coffee" itself appears much more than any other name by a sizable amount. For my price analysis below, I decided to focus only on "coffee," since things like "coffee small pot" and "cup of coffee" would likely be priced very differently and are therefore difficult to compare.
+
+```{r}
+# only USD
+coffee_us <- dollar %>%
+  mutate(dish = tolower(name.y)) %>%
+  mutate(dish = str_remove_all(dish, "[[:punct:]]")) %>%
+  filter(!is.na(dish) & dish == "coffee")
+
+ggplot(coffee_us, aes(date, price17)) +
+  geom_point() +
+  labs(x = "Date", y = "Coffee Price in 2017 Dollars",
+       title = "Coffee Prices at Restaurants Over Time", subtitle = "(In 2017 US Dollars)")
+
+ggplot(filter(coffee_us, price17 > 0), aes(decade, price17)) +
+  geom_boxplot(outlier.shape = NA) +
+  scale_y_continuous(limits = quantile(coffee_us$price17, c(0, 0.99), na.rm = T)) +
+  labs(x = "Date Range", y = "Coffee Price in 2017 Dollars",
+       title = "Coffee Prices at Restaurants Over Time", subtitle = "(In 2017 US Dollars)")
+```
+
+### After seeing the same outlier issues in the scatterplot as with the overall price data, I did the same transformation of the data and visualized it as side-by-side boxplots. In some decades, the sample sizes are quite small for "coffee" dishes so this is not a perfect representation, but we do see a dip in coffee prices around the 1970s, with prices increasing towward the present day. Perhaps this was due to the emergence of more "fancy" coffee drinks with more elaborate names that were excluded from this analysis, but nevertheless we do see that median coffee price tended to decrease generally until the 1970s, and has been increasing since.
+
+
+## How findings can be used
+### We can take these relationships of prices over time and be more cognizant of the value of restaurant meals in the present day. Since my analysis did not include many menus from the most recent decade, we can see if this relationship is actually confirmed that prices are increasing. Another takeaway from this analysis is the finding that coffee seems to be very inelastic in its frequency over time. While most of the dishes on restaurant menus have evolved quite dramatically over time, coffee's prevalence has lasted the test of time. Perhaps we can use this insight to remain aware of coffee's popularity at restaurants.
+
+## Extensions
+### If I had more time/resources to expand upon this project, I would attempt to better categorize dishes into common categories to get a better sense of more broad popularity over time. I could also pick out a certain kind of dish and try to analyze its popularity and price over time. The issue I see with this type of analysis is that some dishes have variable pricing built into them, even if the menu doesn't necessarily show it. For example, a "steak" on one menu may have the same general description as a "steak" on another menu, but they may differ greatly in their size and cut, both of which affect the price. This makes it hard to compare overall trends when there is so much variability within the given subset.
+
+### It would also be nice to try and account for the international currencies in my price analysis, and to translate foreign dish names into a common language so the popularity can be better analyzed. As for prices in general, it would also be helpful to go back through all the scanned menus and correct the incorrectly assigned prices, but that would be a very long process.
+
+## Biggest Challenges
+### There were several aspects of this project that proved difficult. One of which was adjusting the currencies of each menu. Strictly using the CPI values to convert historical prices to a certain year is not a perfect strategy. For one thing, the CPI only measures cost of living based on a specified market basket, and is not great at accounting for large social and environmental shifts in the U.S. I am also utilizing even more of an estimation with these prices, as the CPI was only recorded beginning in 1913, which caused me to rely on further estimates of these CPI values for anything earlier than 1913. Additionally, I was unable to incorporate the international currencies into my price analysis, since I could not find a comprehensive way to account for both the currency type and the year it was from and convert it to a common currency.
+
+### Another challenge that I mentioned earlier was the issue with trying to combine dish names into common categories while assuming they were the same type of dish that could be compared. This limited my text mining to less than I would have liked, but further consolidation would have led to more problems with incorrect categorization and big assumptions.
+
+\newpage
+### Thirdly, an issue that I ran into that limited my analysis ability was the problematic nature of the location variables given for each menu. There were four variables ("sponsor", "event", "location," and "place") that I thought I would be able to render some actionable location data from. However, these variables proved very inconsistent, and there was no clear process of how these descriptions were written. Many even contained question marks (e.g. "(NEW YORK?)") that raised questions of the reliability of these variables. I was hoping to be able to map the expansion of restaurants over time, but these variables did not allow me to do so.
+
+
+## Surprises
+### I was surprised to discover the relationship between the Prohibition era menus and lower prices. The restaurant industry was definitely affected by the Prohibition of alcohol in the U.S., but it was very insightful to see that even in modern-day currency terms, prices were at a low point during this time.
+
+### Also surprising was was the sheer amount of inconsistencies in the overall datasets. This is likely due to the fact that the data were transcribed by a wide variety of volunteers, each of whom probably had a different strategy for recording information. This may suggest that individual transcribers of large and varied data may not be the best idea, at least without a clear, concise ruling for how the data should be recorded. The NYPL documentation states that the reason OCR technology was not used is because many menus were not easy to read, either in handwritten text or complicated cursive. Looking forward, the NYPL may be best suited to put forth more instructions to transcribers to create a more standardized dataset. 
+
+
+
+### References: 
+#### Ewbank, A. (2018, June 15). During the Great Depression, ‘Penny Restaurants’ Fed the Unemployed. In *Atlas Obscura*. Retrieved December 9, 2018, from https://www.atlasobscura.com/articles/restaurants-during-great-depression
+#### Individual Year Conversion Factor Tables (2018). In *Oregon State University*. Retrieved December 6, 2018, from https://liberalarts.oregonstate.edu/spp/polisci/faculty-staff/robert-sahr/inflation-conversion-factors-years-1774-estimated-2024-dollars-recent-years/individual-year-conversion-factor-table-0
+#### Prohibition and the Transformation of American Food. (2011, December 15). In *Freakonomics*. Retrieved December 9, 2018, from http://freakonomics.com/2011/12/15/prohibition-and-the-transformation-of-american-food/
+#### What's on the Menu?. (2011). In *New York Public Library*. Retrieved December 9, 2018, from http://menus.nypl.org
+
